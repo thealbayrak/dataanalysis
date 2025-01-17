@@ -1,0 +1,97 @@
+# Gerekli kütüphaneleri yükleyin
+!pip install imbalanced-learn xgboost
+
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.neural_network import MLPClassifier
+from xgboost import XGBClassifier
+from imblearn.over_sampling import SMOTE
+
+# Google Colab dosya yükleme
+from google.colab import files
+uploaded = files.upload()
+
+# Veri setini yükleyin
+data = pd.read_csv(list(uploaded.keys())[0])  # Yüklenen dosyanın adını alın
+
+# Eksik değerleri doldurun
+data.fillna(data.mean(), inplace=True)
+
+# Özellik matrisini (X) ve hedef değişkeni (y) tanımlayın
+X = data.iloc[:, :-1].values  # Tüm sütunlar (son sütun hariç)
+y = (data.iloc[:, -1] > 0).astype(int)  # Hedef sütun, binary formata dönüştürüldü
+
+# Veriyi bölün ve ölçeklendirin
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# SMOTE ile sınıf dengesizliğini ele alın
+smote = SMOTE(random_state=42)
+X_resampled, y_resampled = smote.fit_resample(X_train_scaled, y_train)
+
+# Random Forest için hiperparametre optimizasyonu
+param_grid_rf = {
+    "n_estimators": [100, 200, 300],
+    "max_depth": [10, 20, None],
+    "min_samples_split": [2, 5, 10]
+}
+
+rf_grid_search = GridSearchCV(estimator=RandomForestClassifier(random_state=42),
+                              param_grid=param_grid_rf, cv=3, scoring="roc_auc", n_jobs=-1, verbose=1)
+rf_grid_search.fit(X_resampled, y_resampled)
+
+# Hibrit model sınıfı
+class ALKODeepHybridModel:
+    def __init__(self):
+        self.rf = rf_grid_search.best_estimator_  # Optimize edilmiş Random Forest
+        self.lr = LogisticRegression(random_state=42)
+        self.ann = MLPClassifier(hidden_layer_sizes=(128, 64), activation='relu', solver='adam', max_iter=100, batch_size=16, random_state=42)
+        self.xgb = XGBClassifier(n_estimators=100, learning_rate=0.1, max_depth=6, random_state=42)
+
+    def fit(self, X_train, y_train):
+        # Modelleri eğit
+        self.rf.fit(X_train, y_train)
+        self.lr.fit(X_train, y_train)
+        self.ann.fit(X_train, y_train)
+        self.xgb.fit(X_train, y_train)
+
+    def predict(self, X_test):
+        # Modellerin tahmin olasılıklarını al
+        rf_probs = self.rf.predict_proba(X_test)[:, 1]
+        lr_probs = self.lr.predict_proba(X_test)[:, 1]
+        ann_probs = self.ann.predict_proba(X_test)[:, 1]
+        xgb_probs = self.xgb.predict_proba(X_test)[:, 1]
+
+        # Olasılıkları ağırlıklı ortalama ile birleştir
+        combined_probs = (0.4 * ann_probs) + (0.3 * rf_probs) + (0.2 * xgb_probs) + (0.1 * lr_probs)
+
+        # Nihai tahminleri üret
+        final_preds = (combined_probs > 0.5).astype(int)
+        return final_preds, combined_probs
+
+# Hibrit modeli oluştur ve eğit
+hybrid_model = ALKODeepHybridModel()
+hybrid_model.fit(X_resampled, y_resampled)
+
+# Test verisi üzerinde tahmin yap
+final_preds, combined_probs = hybrid_model.predict(X_test_scaled)
+
+# Performans metriklerini hesaplayın
+accuracy = accuracy_score(y_test, final_preds)
+precision = precision_score(y_test, final_preds)
+recall = recall_score(y_test, final_preds)
+f1 = f1_score(y_test, final_preds)
+auc_roc = roc_auc_score(y_test, combined_probs)
+
+# Sonuçları yazdır
+print(f"Accuracy: {accuracy * 100:.2f}%")
+print(f"Precision: {precision * 100:.2f}%")
+print(f"Recall: {recall * 100:.2f}%")
+print(f"F1-Score: {f1 * 100:.2f}%")
+print(f"AUC-ROC: {auc_roc * 100:.2f}%")
